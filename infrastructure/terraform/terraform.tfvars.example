@@ -1,0 +1,43 @@
+# Copy this file to terraform.tfvars and customize before running `terraform apply`.
+# terraform.tfvars itself is gitignored so you don't accidentally commit your
+# email address or account-specific values.
+
+aws_region   = "us-east-1"
+project_name = "cloud-compliance-scanner"
+environment  = "prod"
+
+# Regions the scanner Lambda will inspect for idle/unused resources.
+# Add every region your account actually uses resources in -- a region
+# you don't list here is simply never scanned.
+scan_regions = ["us-east-1", "us-west-2"]
+
+# How often the scan runs. See:
+# https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-scheduled-rule-pattern.html
+schedule_expression = "cron(0 8 * * ? *)" # daily at 08:00 UTC
+
+# Where findings get emailed. Leave as "" to skip the email subscription
+# (e.g. if you'll wire up Slack/SQS via notification_endpoints instead).
+notification_email = "you@example.com"
+
+# Only notify on MEDIUM+ severity findings to start; lower to "LOW" once
+# you've tuned thresholds and want full visibility.
+min_severity_to_notify = "MEDIUM"
+
+# Tune these to your environment. Defaults are reasonable starting points.
+ec2_idle_cpu_threshold_pct = 5.0
+ec2_idle_lookback_days     = 14
+ebs_unattached_grace_days  = 7
+snapshot_max_age_days      = 90
+
+# Tags on resources carrying ANY of these keys are never flagged, regardless
+# of how idle they look -- use for known-good long-idle assets (DR standby
+# instances, compliance-archival snapshots, etc).
+exclusion_tag_keys = ["doNotDelete", "scanner:ignore"]
+
+# Set to false if you don't use AWS Config or want to manage rules elsewhere.
+enable_config_rules = true
+required_tag_keys   = ["Environment", "Owner", "CostCenter"]
+
+tags = {
+  Team = "platform-engineering"
+}

@@ -1,0 +1,13 @@
+# Runtime dependencies for the Lambda deployment package.
+#
+# Note: boto3/botocore are PROVIDED by the AWS Lambda Python runtime
+# automatically, so they are intentionally NOT bundled into the deployment
+# zip (see scripts/build_lambda_package.sh) to keep the package small and
+# to always use the version of boto3 AWS Lambda ships with -- avoiding
+# disk-size limits. They are still listed in pyproject.toml so local
+# dev/test environments install them.
+#
+# If you need a newer boto3 than the Lambda runtime provides (e.g. to use
+# a brand-new API), uncomment the line below and the build script will
+# bundle your pinned version instead of relying on the runtime's:
+# boto3==1.34.144

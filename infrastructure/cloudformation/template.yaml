@@ -1,0 +1,525 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Cloud cost & compliance automation: scheduled Lambda scans for idle/unused
+  EC2/EBS/EIP/ELB resources reported via SNS, plus AWS Config custom rules
+  for ongoing compliance drift detection. CloudFormation equivalent of the
+  Terraform stack in infrastructure/terraform/.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-compliance-scanner
+    Description: Prefix used for all created resource names.
+
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment tag applied to resources.
+
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket containing the Lambda deployment package (see scripts/build_lambda_package.sh).
+
+  LambdaCodeKey:
+    Type: String
+    Default: cloud-compliance-scanner/lambda_package.zip
+    Description: S3 key of the Lambda deployment package zip within LambdaCodeBucket.
+
+  ScanRegions:
+    Type: CommaDelimitedList
+    Default: "us-east-1"
+    Description: Comma-separated list of regions the scanner Lambda will inspect.
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(0 8 * * ? *)"
+    Description: EventBridge schedule expression for how often the scan runs.
+
+  NotificationEmail:
+    Type: String
+    Default: ""
+    Description: Email address to subscribe to the findings SNS topic. Leave blank to skip.
+
+  MinSeverityToNotify:
+    Type: String
+    Default: LOW
+    AllowedValues: [LOW, MEDIUM, HIGH]
+    Description: Minimum finding severity that triggers an SNS notification.
+
+  Ec2IdleCpuThresholdPct:
+    Type: Number
+    Default: 5
+
+  Ec2IdleLookbackDays:
+    Type: Number
+    Default: 14
+
+  EbsUnattachedGraceDays:
+    Type: Number
+    Default: 7
+
+  SnapshotMaxAgeDays:
+    Type: Number
+    Default: 90
+
+  ElbIdleLookbackDays:
+    Type: Number
+    Default: 14
+
+  ElbIdleRequestThreshold:
+    Type: Number
+    Default: 1
+
+  ExclusionTagKeys:
+    Type: String
+    Default: "doNotDelete,scanner:ignore"
+    Description: Comma-separated tag keys that exempt a resource from being flagged.
+
+  LambdaMemoryMb:
+    Type: Number
+    Default: 512
+
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 300
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+  EnableConfigRules:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Whether to deploy the AWS Config custom rules. Requires AWS Config already enabled in this account+region.
+
+  RequiredTagKeys:
+    Type: String
+    Default: "Environment,Owner"
+
+  SensitiveSecurityGroupPorts:
+    Type: String
+    Default: "22,3389,3306,5432,1433,27017,6379,9200"
+
+Conditions:
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
+  ConfigRulesEnabled: !Equals [!Ref EnableConfigRules, "true"]
+
+Resources:
+
+  ###############################################################################
+  # S3 bucket for archived reports
+  ###############################################################################
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-${Environment}-reports-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-report-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+          - Id: transition-old-reports
+            Status: Enabled
+            Prefix: reports/
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  ###############################################################################
+  # SNS topic for findings
+  ###############################################################################
+  FindingsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-${Environment}-findings"
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  FindingsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref FindingsTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowLambdaPublish
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: SNS:Publish
+            Resource: !Ref FindingsTopic
+            Condition:
+              StringEquals:
+                "AWS:SourceAccount": !Ref AWS::AccountId
+          - Sid: AllowAccountOwnerFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "SNS:*"
+            Resource: !Ref FindingsTopic
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      TopicArn: !Ref FindingsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  ###############################################################################
+  # IAM role for the scanner Lambda
+  ###############################################################################
+  ScannerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-scanner-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ScannerPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadOnlyResourceInspection
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeAddresses
+                  - ec2:DescribeImages
+                  - ec2:DescribeTags
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeTags
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:ListMetrics
+                Resource: "*"
+              - Sid: CallerIdentity
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+              - Sid: PublishFindings
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref FindingsTopic
+              - Sid: ArchiveReports
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${ReportsBucket.Arn}/*"
+              - Sid: Logging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-scanner*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-scanner*:*"
+
+  ###############################################################################
+  # Scanner Lambda + schedule
+  ###############################################################################
+  ScannerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-scanner"
+      RetentionInDays: !Ref LogRetentionDays
+
+  ScannerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ScannerLogGroup
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${Environment}-scanner"
+      Description: Scans for idle/unused EC2, EBS, EIP, and Load Balancer resources and reports findings via SNS.
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Handler: cloud_compliance_scanner.lambda_handler.handler
+      Runtime: python3.12
+      Role: !GetAtt ScannerLambdaRole.Arn
+      MemorySize: !Ref LambdaMemoryMb
+      Timeout: !Ref LambdaTimeoutSeconds
+      Environment:
+        Variables:
+          SCAN_REGIONS: !Join [",", !Ref ScanRegions]
+          SNS_TOPIC_ARN: !Ref FindingsTopic
+          REPORT_BUCKET: !Ref ReportsBucket
+          REPORT_PREFIX: "reports/"
+          MIN_SEVERITY_TO_NOTIFY: !Ref MinSeverityToNotify
+          EC2_IDLE_CPU_THRESHOLD_PCT: !Ref Ec2IdleCpuThresholdPct
+          EC2_IDLE_LOOKBACK_DAYS: !Ref Ec2IdleLookbackDays
+          EBS_UNATTACHED_GRACE_DAYS: !Ref EbsUnattachedGraceDays
+          SNAPSHOT_MAX_AGE_DAYS: !Ref SnapshotMaxAgeDays
+          ELB_IDLE_LOOKBACK_DAYS: !Ref ElbIdleLookbackDays
+          ELB_IDLE_REQUEST_THRESHOLD: !Ref ElbIdleRequestThreshold
+          EXCLUSION_TAG_KEYS: !Ref ExclusionTagKeys
+          LOG_LEVEL: INFO
+          DRY_RUN: "false"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  ScannerScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-scanner-schedule"
+      Description: Triggers the cloud cost & compliance scanner Lambda on a schedule.
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: ScannerLambdaTarget
+          Arn: !GetAtt ScannerFunction.Arn
+
+  ScannerScheduleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScannerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScannerScheduleRule.Arn
+
+  ###############################################################################
+  # IAM role for AWS Config rule Lambdas
+  ###############################################################################
+  ConfigRuleLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: ConfigRulesEnabled
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-config-rule-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ConfigRulePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PutEvaluations
+                Effect: Allow
+                Action: config:PutEvaluations
+                Resource: "*"
+              - Sid: Logging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-config-*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-config-*:*"
+
+  ###############################################################################
+  # Config rule: EBS encryption
+  ###############################################################################
+  ConfigEbsEncryptionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: ConfigRulesEnabled
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-config-ebs-encryption"
+      RetentionInDays: !Ref LogRetentionDays
+
+  ConfigEbsEncryptionFunction:
+    Type: AWS::Lambda::Function
+    Condition: ConfigRulesEnabled
+    DependsOn: ConfigEbsEncryptionLogGroup
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${Environment}-config-ebs-encryption"
+      Description: "AWS Config custom rule: flags unencrypted EBS volumes."
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Handler: cloud_compliance_scanner.config_rules.ebs_encryption_rule.handler
+      Runtime: python3.12
+      Role: !GetAtt ConfigRuleLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 30
+
+  ConfigEbsEncryptionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: ConfigRulesEnabled
+    Properties:
+      FunctionName: !Ref ConfigEbsEncryptionFunction
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+
+  ConfigEbsEncryptionRule:
+    Type: AWS::Config::ConfigRule
+    Condition: ConfigRulesEnabled
+    DependsOn: ConfigEbsEncryptionInvokePermission
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-${Environment}-ebs-encryption-enabled"
+      Description: "Checks whether EBS volumes are encrypted."
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier: !GetAtt ConfigEbsEncryptionFunction.Arn
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::EC2::Volume"
+
+  ###############################################################################
+  # Config rule: restricted security group ingress
+  ###############################################################################
+  ConfigSecurityGroupLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: ConfigRulesEnabled
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-config-security-group"
+      RetentionInDays: !Ref LogRetentionDays
+
+  ConfigSecurityGroupFunction:
+    Type: AWS::Lambda::Function
+    Condition: ConfigRulesEnabled
+    DependsOn: ConfigSecurityGroupLogGroup
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${Environment}-config-security-group"
+      Description: "AWS Config custom rule: flags security groups with unrestricted ingress on sensitive ports."
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Handler: cloud_compliance_scanner.config_rules.security_group_rule.handler
+      Runtime: python3.12
+      Role: !GetAtt ConfigRuleLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 30
+
+  ConfigSecurityGroupInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: ConfigRulesEnabled
+    Properties:
+      FunctionName: !Ref ConfigSecurityGroupFunction
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+
+  ConfigSecurityGroupRule:
+    Type: AWS::Config::ConfigRule
+    Condition: ConfigRulesEnabled
+    DependsOn: ConfigSecurityGroupInvokePermission
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-${Environment}-restricted-security-group-ingress"
+      Description: "Checks whether security groups allow unrestricted ingress on sensitive ports."
+      InputParameters:
+        !Sub '{"sensitivePorts": "${SensitiveSecurityGroupPorts}"}'
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier: !GetAtt ConfigSecurityGroupFunction.Arn
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::EC2::SecurityGroup"
+
+  ###############################################################################
+  # Config rule: required tags
+  ###############################################################################
+  ConfigRequiredTagsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: ConfigRulesEnabled
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-config-required-tags"
+      RetentionInDays: !Ref LogRetentionDays
+
+  ConfigRequiredTagsFunction:
+    Type: AWS::Lambda::Function
+    Condition: ConfigRulesEnabled
+    DependsOn: ConfigRequiredTagsLogGroup
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${Environment}-config-required-tags"
+      Description: "AWS Config custom rule: flags resources missing required cost-allocation/ownership tags."
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Handler: cloud_compliance_scanner.config_rules.required_tags_rule.handler
+      Runtime: python3.12
+      Role: !GetAtt ConfigRuleLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 30
+
+  ConfigRequiredTagsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: ConfigRulesEnabled
+    Properties:
+      FunctionName: !Ref ConfigRequiredTagsFunction
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+
+  ConfigRequiredTagsRule:
+    Type: AWS::Config::ConfigRule
+    Condition: ConfigRulesEnabled
+    DependsOn: ConfigRequiredTagsInvokePermission
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-${Environment}-required-tags-present"
+      Description: "Checks whether resources have the required cost-allocation/ownership tags."
+      InputParameters:
+        !Sub '{"requiredTagKeys": "${RequiredTagKeys}"}'
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier: !GetAtt ConfigRequiredTagsFunction.Arn
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::EC2::Instance"
+          - "AWS::EC2::Volume"
+          - "AWS::ElasticLoadBalancingV2::LoadBalancer"
+
+Outputs:
+  SnsTopicArn:
+    Description: ARN of the SNS topic findings reports are published to.
+    Value: !Ref FindingsTopic
+
+  ReportsBucketName:
+    Description: Name of the S3 bucket where full JSON scan reports are archived.
+    Value: !Ref ReportsBucket
+
+  ScannerLambdaFunctionName:
+    Description: Name of the scheduled scanner Lambda function.
+    Value: !Ref ScannerFunction
+
+  ManualInvokeCommand:
+    Description: AWS CLI command to manually trigger a scan immediately.
+    Value: !Sub "aws lambda invoke --function-name ${ScannerFunction} --payload '{}' /tmp/scan-output.json && cat /tmp/scan-output.json"

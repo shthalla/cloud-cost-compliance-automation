@@ -1,0 +1,25 @@
+Subject: Cloud Scan: 5 findings, ~$115/mo potential savings
+============================================================
+
+Cloud Cost & Compliance Scan Report
+========================================
+Account: 123456789012
+Scan window: 2026-06-24T08:00:01.123456+00:00 -> 2026-06-24T08:00:47.654321+00:00
+Regions scanned: us-east-1, us-west-2
+Total findings: 5
+Estimated potential monthly savings: $114.88
+
+--- EBS_SNAPSHOT (1 findings, ~$5.00/mo) ---
+  🔴 [HIGH] snap-0fedcba987654321a (us-east-1) ~$5.00/mo -- Snapshot is 187 days old (threshold: 90 days), 100 GiB source volume
+
+--- EBS_VOLUME (1 findings, ~$20.00/mo) ---
+  🔴 [HIGH] vol-0fedcba9876543210 (us-east-1) ~$20.00/mo -- Volume unattached for 46 days (grace period: 7 days), 250 GiB gp3
+
+--- EC2_INSTANCE (1 findings, ~$70.08/mo) ---
+  🔴 [HIGH] i-0a1b2c3d4e5f6g7h8 (us-east-1) ~$70.08/mo -- Average CPU utilization 1.23% over 14 days (threshold: 5.0%), avg NetworkIn 0.41 MB/period
+
+--- ELASTIC_IP (1 findings, ~$3.60/mo) ---
+  🟠 [MEDIUM] eipalloc-0123456789abcdef0 (us-west-2) ~$3.60/mo -- Elastic IP 54.123.45.67 is allocated but not associated with any instance or network interface
+
+--- LOAD_BALANCER (1 findings, ~$16.20/mo) ---
+  🟠 [MEDIUM] legacy-internal-alb (us-east-1) ~$16.20/mo -- Application load balancer received 0 requests/flows over 14 days (threshold: 1)

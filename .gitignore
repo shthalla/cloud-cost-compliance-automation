@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Terraform
+infrastructure/terraform/.terraform/
+infrastructure/terraform/.terraform.lock.hcl
+infrastructure/terraform/*.tfstate
+infrastructure/terraform/*.tfstate.*
+infrastructure/terraform/*.tfplan
+infrastructure/terraform/terraform.tfvars
+infrastructure/terraform/.build/
+infrastructure/terraform/crash.log
+
+# Build artifacts
+.build/
+*.zip
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local scan output
+scan-output.json
+*.local.json
+
+# Secrets (never commit these)
+.env
+.env.*
+*.pem
+*.key

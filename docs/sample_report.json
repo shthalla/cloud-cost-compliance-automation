@@ -1,0 +1,96 @@
+{
+  "scan_started_at": "2026-06-24T08:00:01.123456+00:00",
+  "scan_finished_at": "2026-06-24T08:00:47.654321+00:00",
+  "regions_scanned": [
+    "us-east-1",
+    "us-west-2"
+  ],
+  "finding_count": 5,
+  "total_estimated_monthly_savings_usd": 114.88,
+  "findings": [
+    {
+      "resource_type": "EC2_INSTANCE",
+      "resource_id": "i-0a1b2c3d4e5f6g7h8",
+      "region": "us-east-1",
+      "reason": "Average CPU utilization 1.23% over 14 days (threshold: 5.0%), avg NetworkIn 0.41 MB/period",
+      "severity": "HIGH",
+      "estimated_monthly_cost_usd": 70.08,
+      "detected_at": "2026-06-25T03:22:39.140310+00:00",
+      "account_id": null,
+      "tags": {
+        "Name": "old-batch-worker",
+        "Environment": "staging"
+      },
+      "metadata": {
+        "instance_type": "m5.large",
+        "avg_cpu_pct": 1.234,
+        "launch_time": "2025-11-02T14:23:00+00:00"
+      }
+    },
+    {
+      "resource_type": "EBS_VOLUME",
+      "resource_id": "vol-0fedcba9876543210",
+      "region": "us-east-1",
+      "reason": "Volume unattached for 46 days (grace period: 7 days), 250 GiB gp3",
+      "severity": "HIGH",
+      "estimated_monthly_cost_usd": 20.0,
+      "detected_at": "2026-06-25T03:22:39.140331+00:00",
+      "account_id": null,
+      "tags": {},
+      "metadata": {
+        "size_gb": 250,
+        "volume_type": "gp3",
+        "age_days": 46
+      }
+    },
+    {
+      "resource_type": "ELASTIC_IP",
+      "resource_id": "eipalloc-0123456789abcdef0",
+      "region": "us-west-2",
+      "reason": "Elastic IP 54.123.45.67 is allocated but not associated with any instance or network interface",
+      "severity": "MEDIUM",
+      "estimated_monthly_cost_usd": 3.6,
+      "detected_at": "2026-06-25T03:22:39.140336+00:00",
+      "account_id": null,
+      "tags": {},
+      "metadata": {
+        "public_ip": "54.123.45.67",
+        "domain": "vpc"
+      }
+    },
+    {
+      "resource_type": "EBS_SNAPSHOT",
+      "resource_id": "snap-0fedcba987654321a",
+      "region": "us-east-1",
+      "reason": "Snapshot is 187 days old (threshold: 90 days), 100 GiB source volume",
+      "severity": "HIGH",
+      "estimated_monthly_cost_usd": 5.0,
+      "detected_at": "2026-06-25T03:22:39.140339+00:00",
+      "account_id": null,
+      "tags": {},
+      "metadata": {
+        "volume_size_gb": 100,
+        "age_days": 187,
+        "is_ami_backed": false
+      }
+    },
+    {
+      "resource_type": "LOAD_BALANCER",
+      "resource_id": "legacy-internal-alb",
+      "region": "us-east-1",
+      "reason": "Application load balancer received 0 requests/flows over 14 days (threshold: 1)",
+      "severity": "MEDIUM",
+      "estimated_monthly_cost_usd": 16.2,
+      "detected_at": "2026-06-25T03:22:39.140343+00:00",
+      "account_id": null,
+      "tags": {
+        "Environment": "prod"
+      },
+      "metadata": {
+        "type": "application",
+        "total_requests": 0.0
+      }
+    }
+  ],
+  "errors": []
+}

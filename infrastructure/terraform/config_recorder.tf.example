@@ -1,0 +1,101 @@
+###############################################################################
+# config_recorder.tf.example
+#
+# AWS Config rules require a Configuration Recorder + Delivery Channel to
+# already exist in the account+region. Most organizations enable this ONCE,
+# often at the AWS Organization level via Control Tower / Security Hub, so
+# it's intentionally NOT included in the active Terraform config (to avoid
+# conflicting with an existing recorder, which causes an apply-time error).
+#
+# If you do NOT already have AWS Config enabled in this account+region,
+# rename this file to config_recorder.tf and run `terraform apply` to
+# enable it as part of this stack.
+###############################################################################
+
+# resource "aws_s3_bucket" "config_delivery" {
+#   bucket = "${local.name_prefix}-config-delivery-${local.account_id}"
+#   tags   = local.common_tags
+# }
+#
+# resource "aws_s3_bucket_public_access_block" "config_delivery" {
+#   bucket                  = aws_s3_bucket.config_delivery.id
+#   block_public_acls       = true
+#   block_public_policy     = true
+#   ignore_public_acls      = true
+#   restrict_public_buckets = true
+# }
+#
+# data "aws_iam_policy_document" "config_delivery_bucket_policy" {
+#   statement {
+#     sid     = "AWSConfigBucketPermissionsCheck"
+#     effect  = "Allow"
+#     actions = ["s3:GetBucketAcl"]
+#     resources = [aws_s3_bucket.config_delivery.arn]
+#     principals {
+#       type        = "Service"
+#       identifiers = ["config.amazonaws.com"]
+#     }
+#   }
+#
+#   statement {
+#     sid     = "AWSConfigBucketDelivery"
+#     effect  = "Allow"
+#     actions = ["s3:PutObject"]
+#     resources = ["${aws_s3_bucket.config_delivery.arn}/*"]
+#     principals {
+#       type        = "Service"
+#       identifiers = ["config.amazonaws.com"]
+#     }
+#     condition {
+#       test     = "StringEquals"
+#       variable = "s3:x-amz-acl"
+#       values   = ["bucket-owner-full-control"]
+#     }
+#   }
+# }
+#
+# resource "aws_s3_bucket_policy" "config_delivery" {
+#   bucket = aws_s3_bucket.config_delivery.id
+#   policy = data.aws_iam_policy_document.config_delivery_bucket_policy.json
+# }
+#
+# resource "aws_iam_role" "config_recorder" {
+#   name               = "${local.name_prefix}-config-recorder-role"
+#   assume_role_policy = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = [{
+#       Effect    = "Allow"
+#       Principal = { Service = "config.amazonaws.com" }
+#       Action    = "sts:AssumeRole"
+#     }]
+#   })
+# }
+#
+# resource "aws_iam_role_policy_attachment" "config_recorder" {
+#   role       = aws_iam_role.config_recorder.name
+#   policy_arn = "arn:aws:iam::aws:policy/service-role/AWS_ConfigRole"
+# }
+#
+# resource "aws_config_configuration_recorder" "this" {
+#   name     = "${local.name_prefix}-recorder"
+#   role_arn = aws_iam_role.config_recorder.arn
+#
+#   recording_group {
+#     all_supported                 = true
+#     include_global_resource_types = true
+#   }
+# }
+#
+# resource "aws_config_delivery_channel" "this" {
+#   name           = "${local.name_prefix}-delivery-channel"
+#   s3_bucket_name = aws_s3_bucket.config_delivery.bucket
+#
+#   depends_on = [aws_config_configuration_recorder.this]
+# }
+#
+# resource "aws_config_configuration_recorder_status" "this" {
+#   name       = aws_config_configuration_recorder.this.name
+#   is_enabled = true
+#
+#   depends_on = [aws_config_delivery_channel.this]
+# }
